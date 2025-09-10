@@ -1,5 +1,7 @@
 from flask import Flask, request, jsonify
 from google.cloud import firestore
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 import os, datetime, bcrypt, jwt
 
 app = Flask(__name__)
@@ -9,15 +11,16 @@ app = Flask(__name__)
 # -----------------------
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "super-secret-key")
 DB_NAME = os.getenv("FIRESTORE_DB", "test")
+PROJECT_ID = os.getenv("GCP_PROJECT_ID")  # Set this in Cloud Run env
 
-# Firestore client
 client = firestore.Client(database=DB_NAME)
 
 # -----------------------
 # Initialize DB / Collections
 # -----------------------
 def initialize_db():
-    """Ensure 'users' collection exists and optionally create an admin user."""
+    """Ensure necessary collections exist and create initial documents."""
+    # --- Users collection ---
     users_ref = client.collection("users").limit(1).get()
     if not users_ref:
         print("No users found. Creating default admin user...")
@@ -32,91 +35,56 @@ def initialize_db():
         })
         print(f"Admin user created: {admin_email}")
 
-initialize_db()
+    # --- Example Posts collection ---
+    posts_ref = client.collection("posts").limit(1).get()
+    if not posts_ref:
+        print("Creating sample posts...")
+        client.collection("posts").add({
+            "title": "Welcome Post",
+            "content": "This is a sample post.",
+            "created_at": datetime.datetime.utcnow(),
+            "author": "system"
+        })
+        print("Sample post created.")
+
+    # --- Auto-create indexes ---
+    create_indexes()
 
 # -----------------------
-# Signup Route
+# Firestore Index Creation
 # -----------------------
-@app.route("/signup", methods=["POST"])
-def signup():
-    data = request.json
-    email = data.get("email")
-    password = data.get("password")
-
-    if not email or not password:
-        return jsonify({"error": "Email and password required"}), 400
-
-    # Check if user exists
-    user_ref = client.collection("users").where("email", "==", email).get()
-    if user_ref:
-        return jsonify({"error": "User already exists"}), 400
-
-    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    client.collection("users").add({
-        "email": email,
-        "password": hashed,
-        "created_at": datetime.datetime.utcnow(),
-        "role": "user"
-    })
-
-    return jsonify({"message": "User created successfully"}), 201
-
-# -----------------------
-# Signin Route
-# -----------------------
-@app.route("/signin", methods=["POST"])
-def signin():
-    data = request.json
-    email = data.get("email")
-    password = data.get("password")
-
-    if not email or not password:
-        return jsonify({"error": "Email and password required"}), 400
-
-    users = client.collection("users").where("email", "==", email).get()
-    if not users:
-        return jsonify({"error": "User not found"}), 404
-
-    user = users[0].to_dict()
-    hashed_pw = user["password"]
-
-    if not bcrypt.checkpw(password.encode("utf-8"), hashed_pw.encode("utf-8")):
-        return jsonify({"error": "Invalid password"}), 401
-
-    token = jwt.encode({
-        "email": email,
-        "role": user.get("role", "user"),
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-    }, app.config["SECRET_KEY"], algorithm="HS256")
-
-    return jsonify({"token": token})
-
-# -----------------------
-# Protected Route
-# -----------------------
-@app.route("/profile", methods=["GET"])
-def profile():
-    token = request.headers.get("Authorization")
-    if not token:
-        return jsonify({"error": "Token missing"}), 401
-
+def create_indexes():
+    """
+    Auto-create composite indexes for common queries:
+    e.g., posts ordered by created_at and filtered by author.
+    """
     try:
-        decoded = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
-        return jsonify({"message": f"Welcome {decoded['email']}!", "role": decoded.get("role")})
-    except jwt.ExpiredSignatureError:
-        return jsonify({"error": "Token expired"}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({"error": "Invalid token"}), 401
+        credentials = service_account.Credentials.from_service_account_file(
+            os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        )
+        service = build('firestore', 'v1', credentials=credentials)
+        parent = f'projects/{PROJECT_ID}/databases/(default)/collectionGroups/posts/indexes'
 
-# -----------------------
-# Health Check
-# -----------------------
-@app.route("/")
-def home():
-    return jsonify({"status": "running", "db": DB_NAME})
+        indexes_to_create = [
+            {
+                "fields": [
+                    {"fieldPath": "author", "order": "ASCENDING"},
+                    {"fieldPath": "created_at", "order": "DESCENDING"}
+                ],
+                "queryScope": "COLLECTION"
+            }
+        ]
 
-# -----------------------
-# Main
-# -----------------------
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+        for index in indexes_to_create:
+            # Firestore Admin API requires POST to create index
+            request = service.projects().databases().collectionGroups().indexes().create(
+                parent=f'projects/{PROJECT_ID}/databases/(default)/collectionGroups/posts',
+                body=index
+            )
+            response = request.execute()
+            print(f"Index creation requested: {response.get('name')}")
+
+    except Exception as e:
+        print(f"Index creation skipped or failed: {e}")
+
+initialize_db()
