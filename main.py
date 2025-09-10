@@ -4,13 +4,35 @@ import os, datetime, bcrypt, jwt
 
 app = Flask(__name__)
 
-# Use secret key for JWT (store in Cloud Run ENV)
+# -----------------------
+# Config
+# -----------------------
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "super-secret-key")
-
-# Firestore client (pointing to your custom DB)
 DB_NAME = os.getenv("FIRESTORE_DB", "test")
+
+# Firestore client
 client = firestore.Client(database=DB_NAME)
 
+# -----------------------
+# Initialize DB / Collections
+# -----------------------
+def initialize_db():
+    """Ensure 'users' collection exists and optionally create an admin user."""
+    users_ref = client.collection("users").limit(1).get()
+    if not users_ref:
+        print("No users found. Creating default admin user...")
+        admin_email = os.getenv("ADMIN_EMAIL", "admin@example.com")
+        admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
+        hashed_pw = bcrypt.hashpw(admin_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        client.collection("users").add({
+            "email": admin_email,
+            "password": hashed_pw,
+            "created_at": datetime.datetime.utcnow(),
+            "role": "admin"
+        })
+        print(f"Admin user created: {admin_email}")
+
+initialize_db()
 
 # -----------------------
 # Signup Route
@@ -29,18 +51,15 @@ def signup():
     if user_ref:
         return jsonify({"error": "User already exists"}), 400
 
-    # Hash password
     hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
-    # Save user
     client.collection("users").add({
         "email": email,
         "password": hashed,
-        "created_at": datetime.datetime.utcnow()
+        "created_at": datetime.datetime.utcnow(),
+        "role": "user"
     })
 
     return jsonify({"message": "User created successfully"}), 201
-
 
 # -----------------------
 # Signin Route
@@ -54,7 +73,6 @@ def signin():
     if not email or not password:
         return jsonify({"error": "Email and password required"}), 400
 
-    # Lookup user
     users = client.collection("users").where("email", "==", email).get()
     if not users:
         return jsonify({"error": "User not found"}), 404
@@ -62,18 +80,16 @@ def signin():
     user = users[0].to_dict()
     hashed_pw = user["password"]
 
-    # Verify password
     if not bcrypt.checkpw(password.encode("utf-8"), hashed_pw.encode("utf-8")):
         return jsonify({"error": "Invalid password"}), 401
 
-    # Create JWT token
     token = jwt.encode({
         "email": email,
+        "role": user.get("role", "user"),
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
     }, app.config["SECRET_KEY"], algorithm="HS256")
 
     return jsonify({"token": token})
-
 
 # -----------------------
 # Protected Route
@@ -86,12 +102,11 @@ def profile():
 
     try:
         decoded = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
-        return jsonify({"message": f"Welcome {decoded['email']}!"})
+        return jsonify({"message": f"Welcome {decoded['email']}!", "role": decoded.get("role")})
     except jwt.ExpiredSignatureError:
         return jsonify({"error": "Token expired"}), 401
     except jwt.InvalidTokenError:
         return jsonify({"error": "Invalid token"}), 401
-
 
 # -----------------------
 # Health Check
@@ -100,6 +115,8 @@ def profile():
 def home():
     return jsonify({"status": "running", "db": DB_NAME})
 
-
+# -----------------------
+# Main
+# -----------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
