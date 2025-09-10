@@ -4,3 +4,4 @@ google-cloud-firestore
 google-auth
 bcrypt
 pyjwt
+google-api-python-client
