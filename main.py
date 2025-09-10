@@ -9,7 +9,7 @@ def check_auth():
     try:
         # Check what credentials Cloud Run is using
         creds, project = default()
-        client = firestore.Client()
+        client = firestore.Client(database="skill-assessment")
         docs = client.collection("test").limit(1).get()
 
         return jsonify({
