@@ -1,4 +1,6 @@
-flask==3.0.3
-gunicorn==21.2.0
+flask
+gunicorn
 google-cloud-firestore
 google-auth
+bcrypt
+pyjwt
